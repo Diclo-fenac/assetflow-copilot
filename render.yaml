@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: assetflow-copilot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python seed.py || true && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SLACK_BOT_TOKEN
+        sync: false
+      - key: SLACK_SIGNING_SECRET
+        sync: false
+      - key: SLACK_APP_TOKEN
+        sync: false
+      - key: SLACK_APPROVALS_CHANNEL
+        sync: false
+      - key: ASSETFLOW_API_URL
+        sync: false
+      - key: ASSETFLOW_ADMIN_TOKEN
+        sync: false
+      - key: ASSETFLOW_ORG_ID
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        value: sqlite+aiosqlite:////data/agent_local.db
+    disk:
+      name: copilot-db
+      mountPath: /data
+      sizeGB: 1
