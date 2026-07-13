@@ -215,12 +215,21 @@ def build_approval_block(request_id: int, requester_name: str, asset_tag: str, a
     ]
 
 
-def build_home_tab(user_assets: list[dict], pending_requests: list[AssetRequest] = None) -> dict:
+def build_home_tab(user_assets: list[dict], pending_requests: list[AssetRequest] = None, mapping_email: str = None) -> dict:
     """Build App Home tab view."""
+    status_text = (
+        f"🟢 *Connected to AssetFlow* as *{mapping_email}*"
+        if mapping_email
+        else "🟡 *Not connected to AssetFlow database.*\nRun `/link-account <email>` in DMs to connect."
+    )
     blocks = [
         {
             "type": "header",
             "text": {"type": "plain_text", "text": "AssetFlow Agent"},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": status_text},
         },
         {"type": "divider"},
         {
@@ -449,7 +458,8 @@ async def handle_home_tab(event: dict, client: AsyncWebClient):
             )
             pending_requests = list(result.scalars().all())
 
-    view = build_home_tab(user_assets, pending_requests)
+    mapping_email = mapping.email if mapping else None
+    view = build_home_tab(user_assets, pending_requests, mapping_email)
     await client.views_publish(user_id=slack_user_id, view=view)
 
 
