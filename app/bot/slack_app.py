@@ -340,18 +340,40 @@ async def handle_mention(event: dict, say, client: AsyncWebClient):
     if needs_asset:
         # Extract category hint
         category = None
-        for cat_hint in ["laptop", "monitor", "keyboard", "mouse", "phone", "headset", "charger", "tablet", "camera"]:
-            if cat_hint in text_lower:
-                category = cat_hint.capitalize()
+        db_category_name = None
+        for hint, db_cat in [
+            ("laptop", "Laptops"),
+            ("monitor", "Monitors"),
+            ("keyboard", "Accessories"),
+            ("mouse", "Accessories"),
+            ("trackpad", "Accessories"),
+            ("hub", "Accessories"),
+            ("charger", "Accessories"),
+            ("phone", "Accessories"),
+            ("tablet", "Accessories"),
+            ("headset", "AV Equipment"),
+            ("webcam", "AV Equipment"),
+            ("microphone", "AV Equipment"),
+            ("speakerphone", "AV Equipment"),
+            ("av", "AV Equipment"),
+            ("chair", "Furniture"),
+            ("desk", "Furniture"),
+            ("furniture", "Furniture")
+        ]:
+            if hint in text_lower:
+                category = hint.capitalize()
+                db_category_name = db_cat
                 break
 
         assets = await api.list_assets(status="Available")
-        if category and assets:
+        if (db_category_name or category) and assets:
             cats = await api.get_categories()
             cat_id = None
             if cats:
                 for c in cats:
-                    if c["name"].lower() == category.lower():
+                    target_name = (db_category_name or category).lower()
+                    c_name_lower = c["name"].lower()
+                    if c_name_lower == target_name or c_name_lower == target_name + "s" or target_name in c_name_lower:
                         cat_id = c["id"]
                         break
             if cat_id:
@@ -432,18 +454,40 @@ async def handle_dm(event: dict, say, client: AsyncWebClient):
     if needs_asset:
         # Extract category hint
         category = None
-        for cat_hint in ["laptop", "monitor", "keyboard", "mouse", "phone", "headset", "charger", "tablet", "camera"]:
-            if cat_hint in text_lower:
-                category = cat_hint.capitalize()
+        db_category_name = None
+        for hint, db_cat in [
+            ("laptop", "Laptops"),
+            ("monitor", "Monitors"),
+            ("keyboard", "Accessories"),
+            ("mouse", "Accessories"),
+            ("trackpad", "Accessories"),
+            ("hub", "Accessories"),
+            ("charger", "Accessories"),
+            ("phone", "Accessories"),
+            ("tablet", "Accessories"),
+            ("headset", "AV Equipment"),
+            ("webcam", "AV Equipment"),
+            ("microphone", "AV Equipment"),
+            ("speakerphone", "AV Equipment"),
+            ("av", "AV Equipment"),
+            ("chair", "Furniture"),
+            ("desk", "Furniture"),
+            ("furniture", "Furniture")
+        ]:
+            if hint in text_lower:
+                category = hint.capitalize()
+                db_category_name = db_cat
                 break
 
         assets = await api.list_assets(status="Available")
-        if category and assets:
+        if (db_category_name or category) and assets:
             cats = await api.get_categories()
             cat_id = None
             if cats:
                 for c in cats:
-                    if c["name"].lower() == category.lower():
+                    target_name = (db_category_name or category).lower()
+                    c_name_lower = c["name"].lower()
+                    if c_name_lower == target_name or c_name_lower == target_name + "s" or target_name in c_name_lower:
                         cat_id = c["id"]
                         break
             if cat_id:
