@@ -34,12 +34,22 @@ class MockUserMapping:
         self.email = email
 
 async def get_user_mapping(slack_user_id: str) -> MockUserMapping | None:
+    logger.info(f"[DEBUG] get_user_mapping called for Slack user: {slack_user_id}")
+    logger.info(f"[DEBUG] Bot calling backend URL: {settings.assetflow_api_url} with Org ID: {settings.assetflow_org_id}")
     members = await api.get_members()
     if not members:
+        logger.error("[DEBUG] api.get_members() returned None or empty list")
         return None
+    logger.info(f"[DEBUG] Successfully retrieved {len(members)} members from backend")
     for m in members:
-        if m.get("User") and m["User"].get("slack_user_id") == slack_user_id:
-            return MockUserMapping(m["User"]["id"], m["User"]["email"])
+        u = m.get("User")
+        if u:
+            db_slack_id = u.get("slack_user_id")
+            logger.info(f"[DEBUG] Comparing Slack ID '{slack_user_id}' with DB User '{u.get('email')}' (Slack ID in DB: '{db_slack_id}')")
+            if db_slack_id == slack_user_id:
+                logger.info(f"[DEBUG] Success! Match found for user_id={u['id']}")
+                return MockUserMapping(u["id"], u["email"])
+    logger.warning(f"[DEBUG] No match found in DB for Slack user: {slack_user_id}")
     return None
 
 
