@@ -27,7 +27,7 @@ async def seed():
                 slack_user_id="U0BGW2TB23C",  # Employee (and Manager for demo)
                 slack_workspace_id="T0BGEMDKKT9",
                 assetflow_user_id=1,
-                email="user@example.com",
+                email="mayank@example.com",
             ),
         ]
         session.add_all(users)

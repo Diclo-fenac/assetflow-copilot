@@ -126,26 +126,40 @@ async def create_allocation(asset_tag: str, user_id: int, return_date: str | Non
     return f"Allocation successful. {result.get('message', 'Asset assigned.')}"
 
 
+@tool
+async def report_hardware_issue(asset_tag: str, issue_description: str, priority: str = "High") -> str:
+    """Report a hardware issue or damage for an asset. Use this when a user complains about a broken or malfunctioning asset."""
+    result = await api.report_hardware_issue(
+        asset_tag=asset_tag,
+        issue_description=issue_description,
+        priority=priority,
+    )
+    if not result:
+        return f"Failed to report issue for {asset_tag}. It may not exist or is already disposed."
+    return f"Successfully created a maintenance ticket for {asset_tag}. Priority: {priority}."
+
+
 # ── Agent State ──────────────────────────────────────────────────────────────
 
-TOOLS = [lookup_asset, search_available_assets, get_user_assets, get_overdue_assets, create_allocation]
+TOOLS = [lookup_asset, search_available_assets, get_user_assets, get_overdue_assets, create_allocation, report_hardware_issue]
 
-SYSTEM_PROMPT = """You are AssetFlow Copilot, a professional IT asset management assistant inside Slack.
+SYSTEM_PROMPT = """You are **AssetFlow Copilot**, a highly intelligent, proactive, and slightly witty IT asset management assistant inside Slack.
 
 You help employees with:
 1. Looking up assets by tag (e.g. "Who owns AF-0005?")
 2. Finding available assets when they need equipment ("I need a laptop")
 3. Showing what assets are allocated to them ("What assets do I have?")
 4. Checking overdue allocations
+5. Reporting damaged or broken hardware (e.g. "I dropped my laptop, the screen is cracked")
 
-RULES:
-- Always use the provided tools to get real data. Never make up asset information.
-- Use a professional, clean tone. Avoid excessive emojis. Use standard markdown like bolding or bullet points (•).
-- When a user asks for an asset, search available ones and recommend up to 3 options.
-- You CANNOT directly allocate assets. Asset requests go through a manager approval workflow.
-- When recommending assets, list them clearly with tag, name, condition, and location.
-- If the user asks for help or is confused, provide a clean, professional list of what you can do (lookup, search, view assigned, request).
-- For asset requests, after showing options, tell the user to select one using the interactive buttons below your message.
+RULES & PERSONA:
+- Always use the provided tools to get real data. Never hallucinate asset information.
+- Write with a polished, highly professional, but occasionally witty persona (e.g., "I've dispatched the digital paperwork", "Let me dive into the IT vault for you").
+- Use rich markdown formatting (bolding headers, bullet points, code blocks for tags) so your Slack messages look incredible.
+- When a user reports a hardware issue, be empathetic to their situation, report the issue using the tool, and assure them IT is on it.
+- When a user asks for an asset, search available ones and recommend up to 3 options with pristine formatting.
+- If the user asks for help, provide a beautifully formatted summary of what you can do (lookup, search, view assigned, request).
+- For asset requests, after showing options, tell the user to select one using the interactive Block Kit buttons below your message (which the Slack Event handler will inject).
 
 CONTEXT (injected per request):
 {context}
@@ -206,5 +220,15 @@ async def run_agent(user_message: str, context: str = "") -> str:
     # Extract last AI message text
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
-            return msg.content
+            if isinstance(msg.content, str):
+                return msg.content
+            elif isinstance(msg.content, list):
+                parts = []
+                for chunk in msg.content:
+                    if isinstance(chunk, dict) and "text" in chunk:
+                        parts.append(chunk["text"])
+                    elif isinstance(chunk, str):
+                        parts.append(chunk)
+                if parts:
+                    return "".join(parts)
     return "I couldn't process that request. Please try again."

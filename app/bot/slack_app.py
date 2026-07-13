@@ -12,7 +12,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
 from app.core.config import settings
-from app.db.database import AsyncSessionLocal, AssetRequest, UserMapping, TenantMapping
+from app.db.database import AsyncSessionLocal, AssetRequest
 from app.agent.langgraph_agent import run_agent
 from app.services import assetflow_api as api
 
@@ -24,24 +24,27 @@ app = AsyncApp(
 )
 
 
+import re
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-async def get_user_mapping(slack_user_id: str) -> UserMapping | None:
-    from sqlalchemy import select
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(UserMapping).where(UserMapping.slack_user_id == slack_user_id)
-        )
-        return result.scalar_one_or_none()
+class MockUserMapping:
+    def __init__(self, af_id, email):
+        self.assetflow_user_id = af_id
+        self.email = email
+
+async def get_user_mapping(slack_user_id: str) -> MockUserMapping | None:
+    members = await api.get_members()
+    if not members:
+        return None
+    for m in members:
+        if m.get("User") and m["User"].get("slack_user_id") == slack_user_id:
+            return MockUserMapping(m["User"]["id"], m["User"]["email"])
+    return None
 
 
-async def get_tenant(slack_workspace_id: str) -> TenantMapping | None:
-    from sqlalchemy import select
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(TenantMapping).where(TenantMapping.slack_workspace_id == slack_workspace_id)
-        )
-        return result.scalar_one_or_none()
+async def get_tenant(slack_workspace_id: str):
+    return None
 
 
 async def save_request(slack_user_id: str, slack_workspace_id: str, af_user_id: int, asset_tag: str, asset_name: str, notes: str = None) -> AssetRequest:
@@ -162,14 +165,14 @@ def build_approval_block(request_id: int, requester_name: str, asset_tag: str, a
                     "type": "button",
                     "text": {"type": "plain_text", "text": "Approve"},
                     "action_id": "approve_request",
-                    "value": str(request_id),
+                    "value": json.dumps({"transfer_id": request_id, "slack_user_id": requester_name.strip("<@>")}),
                     "style": "primary",
                 },
                 {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "Reject"},
                     "action_id": "reject_request",
-                    "value": str(request_id),
+                    "value": json.dumps({"transfer_id": request_id, "slack_user_id": requester_name.strip("<@>")}),
                     "style": "danger",
                 },
             ],
@@ -315,6 +318,14 @@ async def handle_mention(event: dict, say, client: AsyncWebClient):
 
     # Check if user asking for available assets -> use Block Kit
     text_lower = text.lower()
+
+    # Check for Audit start request
+    audit_match = re.search(r'start an audit for\s+(.+)', text_lower, re.IGNORECASE)
+    if audit_match:
+        dept_name = audit_match.group(1).strip().strip(".?!")
+        await start_bot_auditor(slack_user_id, dept_name, say, client)
+        return
+
     needs_asset = any(kw in text_lower for kw in ["need", "want", "request", "get me", "looking for", "require"])
     if needs_asset:
         # Extract category hint
@@ -397,6 +408,44 @@ async def handle_dm(event: dict, say, client: AsyncWebClient):
     if mapping:
         context = f"Slack user {slack_user_id} maps to AssetFlow user_id={mapping.assetflow_user_id}, email={mapping.email}."
 
+    # Check if user asking for available assets -> use Block Kit
+    text_lower = text.lower()
+
+    # Check for Audit start request
+    audit_match = re.search(r'start an audit for\s+(.+)', text_lower, re.IGNORECASE)
+    if audit_match:
+        dept_name = audit_match.group(1).strip().strip(".?!")
+        await start_bot_auditor(slack_user_id, dept_name, say, client)
+        return
+
+    needs_asset = any(kw in text_lower for kw in ["need", "want", "request", "get me", "looking for", "require"])
+    if needs_asset:
+        # Extract category hint
+        category = None
+        for cat_hint in ["laptop", "monitor", "keyboard", "mouse", "phone", "headset", "charger", "tablet", "camera"]:
+            if cat_hint in text_lower:
+                category = cat_hint.capitalize()
+                break
+
+        assets = await api.list_assets(status="Available")
+        if category and assets:
+            cats = await api.get_categories()
+            cat_id = None
+            if cats:
+                for c in cats:
+                    if c["name"].lower() == category.lower():
+                        cat_id = c["id"]
+                        break
+            if cat_id:
+                assets = [a for a in assets if a.get("category_id") == cat_id]
+
+        if assets:
+            blocks = build_recommendation_blocks(assets, f"Matching: {category or 'all categories'}")
+            await say(blocks=blocks, text=f"Found {len(assets)} available asset(s).")
+        else:
+            await say(f"No available assets found{' in category ' + category if category else ''}. Try asking your Asset Manager.")
+        return
+
     response = await run_agent(text, context)
     await say(response)
 
@@ -439,12 +488,29 @@ async def handle_confirm_request(ack, body, client: AsyncWebClient):
     if not mapping:
         await client.chat_update(
             channel=channel, ts=ts,
-            text="❌ Your Slack account is not linked to AssetFlow. Contact your admin.",
+            text="[Error] Your Slack account is not linked to AssetFlow. Contact your admin.",
             blocks=[],
         )
         return
 
-    # Save request locally
+    # Call Backend API to create TransferRequest
+    transfer_res = await api.request_transfer(
+        asset_tag=tag,
+        requested_new_holder_id=mapping.assetflow_user_id,
+        reason="Requested via Slack"
+    )
+
+    if not transfer_res or "transfer_request" not in transfer_res:
+        await client.chat_update(
+            channel=channel, ts=ts,
+            text=f"[Error] Failed to create request. The asset may no longer be available.",
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": f"[Error] Failed to create request. The asset may no longer be available."}}],
+        )
+        return
+
+    transfer_id = transfer_res["transfer_request"]["id"]
+
+    # Save request locally (mostly for App Home tab)
     req = await save_request(
         slack_user_id=slack_user_id,
         slack_workspace_id=slack_workspace_id,
@@ -457,16 +523,21 @@ async def handle_confirm_request(ack, body, client: AsyncWebClient):
     # Update employee message
     await client.chat_update(
         channel=channel, ts=ts,
-        text=f"📨 Request `REQ-{req.id:04d}` submitted for *{name}* (`{tag}`). Awaiting manager approval.",
+        text=f"[Submitted] Request `TRF-{transfer_id}` submitted for *{name}* (`{tag}`). Awaiting manager approval.",
         blocks=[{
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"📨 Request `REQ-{req.id:04d}` submitted for *{name}* (`{tag}`).\n\n🕐 *Status:* Awaiting manager approval."},
+            "text": {"type": "mrkdwn", "text": f"[Submitted] Request `TRF-{transfer_id}` submitted for *{name}* (`{tag}`).\n\n*Status:* Awaiting manager approval."},
         }],
     )
 
     # Get user info for display name
-    user_info = await client.users_info(user=slack_user_id)
-    requester_name = user_info["user"]["real_name"] if user_info.get("ok") else slack_user_id
+    requester_name = f"<@{slack_user_id}>"
+    try:
+        user_info = await client.users_info(user=slack_user_id)
+        if user_info.get("ok"):
+            requester_name = user_info["user"]["real_name"]
+    except Exception:
+        pass
 
     # Post approval card to approvals channel
     tenant = await get_tenant(slack_workspace_id)
@@ -475,11 +546,11 @@ async def handle_confirm_request(ack, body, client: AsyncWebClient):
         approvals_channel = settings.slack_approvals_channel
 
     if approvals_channel:
-        approval_blocks = build_approval_block(req.id, requester_name, tag, name, "Requested via Slack")
+        approval_blocks = build_approval_block(transfer_id, requester_name, tag, name, "Requested via Slack")
         resp = await client.chat_postMessage(
             channel=approvals_channel,
             blocks=approval_blocks,
-            text=f"New asset request REQ-{req.id:04d} from {requester_name}",
+            text=f"New asset request TRF-{transfer_id} from {requester_name}",
         )
         # Save message_ts for later update
         if resp.get("ok"):
@@ -501,143 +572,141 @@ async def handle_cancel_request(ack, body, client: AsyncWebClient):
     await client.chat_update(
         channel=channel, ts=ts,
         text="Request cancelled.",
-        blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": "❌ Request cancelled."}}],
+        blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": "[Cancelled] Request cancelled."}}],
     )
 
 
 @app.action("approve_request")
 async def handle_approve(ack, body, client: AsyncWebClient):
-    """Manager approves asset request -> call POST /api/allocations -> notify employee."""
+    """Manager approves asset request -> call PATCH /api/allocations/transfers/:id/approve -> notify employee."""
     await ack()
-    request_id = int(body["actions"][0]["value"])
+    data = json.loads(body["actions"][0]["value"])
+    transfer_id = data["transfer_id"]
+    requester_slack_id = data.get("slack_user_id")
+    
     approver_slack_id = body["user"]["id"]
     channel = body["channel"]["id"]
     ts = body["message"]["ts"]
 
-    # Load request
-    from sqlalchemy import select
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(AssetRequest).where(AssetRequest.id == request_id))
-        req = result.scalar_one_or_none()
-
-    if not req or req.status != "Pending":
-        await client.chat_update(
-            channel=channel, ts=ts,
-            text=f"Request REQ-{request_id:04d} already processed.",
-            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": f"Request `REQ-{request_id:04d}` already processed."}}],
-        )
-        return
-
-    # Calculate return date (30 days from now)
-    return_date = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%d")
-
-    # Call AssetFlow allocation API
-    result = await api.allocate_asset(
-        asset_tag=req.asset_tag,
-        assigned_to_user_id=req.assetflow_user_id,
-        expected_return_date=return_date,
-        notes=f"Approved via Slack by <@{approver_slack_id}>. Request REQ-{request_id:04d}.",
-    )
+    # Call AssetFlow transfer approve API
+    result = await api.approve_transfer(transfer_id)
 
     if not result:
-        await client.chat_postMessage(
-            channel=channel,
-            text=f"⚠️ Allocation failed for REQ-{request_id:04d}. Asset may no longer be available.",
+        await client.chat_update(
+            channel=channel, ts=ts,
+            text=f"⚠️ Approval failed for TRF-{transfer_id}. Asset may no longer be available.",
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": f"⚠️ Approval failed for `TRF-{transfer_id}`. Asset may no longer be available, or the request was already processed in the frontend."}}],
         )
         return
 
-    # Update local status
-    await update_request_status(request_id, "Approved", approved_by=approver_slack_id)
-
     # Get approver name
-    approver_info = await client.users_info(user=approver_slack_id)
-    approver_name = approver_info["user"]["real_name"] if approver_info.get("ok") else approver_slack_id
+    approver_name = f"<@{approver_slack_id}>"
+    try:
+        approver_info = await client.users_info(user=approver_slack_id)
+        if approver_info.get("ok"):
+            approver_name = approver_info["user"]["real_name"]
+    except Exception:
+        pass
 
     # Update approval card
     await client.chat_update(
         channel=channel, ts=ts,
-        text=f"✅ REQ-{request_id:04d} approved.",
-        blocks=[{
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": (
-                    f"✅ *Approved* — `REQ-{request_id:04d}`\n\n"
-                    f"💻 *{req.asset_name}* (`{req.asset_tag}`) allocated to <@{req.slack_user_id}>.\n"
-                    f"👤 Approved by: {approver_name}\n"
-                    f"📅 Return by: {return_date}\n"
-                    f"📋 Audit record created in AssetFlow."
-                ),
+        text=f"[Approved] TRF-{transfer_id} approved.",
+        blocks=[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"[Approved] `TRF-{transfer_id}`\n\n"
+                        f" Asset has been allocated/transferred to <@{requester_slack_id}>.\n"
+                        f" Approved by: {approver_name}\n"
+                        f" Audit record created in AssetFlow."
+                    ),
+                },
             },
-        }],
+        ],
     )
 
     # DM the employee
-    await client.chat_postMessage(
-        channel=req.slack_user_id,
-        text=f"✅ Your request for {req.asset_name} ({req.asset_tag}) has been approved!",
-        blocks=[{
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": (
-                    f"🎉 *Asset Approved & Allocated!*\n\n"
-                    f"💻 *{req.asset_name}* (`{req.asset_tag}`) has been assigned to you.\n"
-                    f"👤 Approved by: {approver_name}\n"
-                    f"📅 Expected return: {return_date}\n"
-                    f"📋 Audit record created in AssetFlow."
-                ),
-            },
-        }],
-    )
+    if requester_slack_id:
+        await client.chat_postMessage(
+            channel=requester_slack_id,
+            text=f"[Approved] Your transfer request TRF-{transfer_id} has been approved!",
+            blocks=[{
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"[Asset Approved & Allocated]\n\n"
+                        f" Your request `TRF-{transfer_id}` has been approved and assigned to you.\n"
+                        f" Approved by: {approver_name}\n"
+                        f" Audit record created in AssetFlow."
+                    ),
+                },
+            }],
+        )
 
 
 @app.action("reject_request")
 async def handle_reject(ack, body, client: AsyncWebClient):
     """Manager rejects asset request."""
     await ack()
-    request_id = int(body["actions"][0]["value"])
+    data = json.loads(body["actions"][0]["value"])
+    transfer_id = data["transfer_id"]
+    requester_slack_id = data.get("slack_user_id")
+    
     rejector_slack_id = body["user"]["id"]
     channel = body["channel"]["id"]
     ts = body["message"]["ts"]
 
-    from sqlalchemy import select
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(AssetRequest).where(AssetRequest.id == request_id))
-        req = result.scalar_one_or_none()
+    result = await api.reject_transfer(transfer_id, reason=f"Rejected via Slack by <@{rejector_slack_id}>")
 
-    if not req or req.status != "Pending":
+    if not result:
+        await client.chat_update(
+            channel=channel, ts=ts,
+            text=f"⚠️ Rejection failed for TRF-{transfer_id}.",
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": f"⚠️ Rejection failed for `TRF-{transfer_id}`. The request may have already been processed in the frontend."}}],
+        )
         return
 
-    await update_request_status(request_id, "Rejected", approved_by=rejector_slack_id)
-
-    rejector_info = await client.users_info(user=rejector_slack_id)
-    rejector_name = rejector_info["user"]["real_name"] if rejector_info.get("ok") else rejector_slack_id
+    rejector_name = f"<@{rejector_slack_id}>"
+    try:
+        rejector_info = await client.users_info(user=rejector_slack_id)
+        if rejector_info.get("ok"):
+            rejector_name = rejector_info["user"]["real_name"]
+    except Exception:
+        pass
 
     await client.chat_update(
         channel=channel, ts=ts,
-        text=f"❌ REQ-{request_id:04d} rejected.",
-        blocks=[{
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"❌ *Rejected* — `REQ-{request_id:04d}`\n\n💻 {req.asset_name} (`{req.asset_tag}`)\n👤 Rejected by: {rejector_name}",
+        text=f"[Rejected] TRF-{transfer_id} rejected.",
+        blocks=[
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"[Rejected] `TRF-{transfer_id}`\n\n*Rejected by:* {rejector_name}",
+                },
             },
-        }],
+        ],
     )
 
     # DM the employee
-    await client.chat_postMessage(
-        channel=req.slack_user_id,
-        text=f"❌ Your request for {req.asset_name} ({req.asset_tag}) was rejected.",
-        blocks=[{
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"❌ *Request Rejected*\n\nYour request `REQ-{request_id:04d}` for *{req.asset_name}* (`{req.asset_tag}`) was rejected by {rejector_name}.",
-            },
-        }],
-    )
+    if requester_slack_id:
+        await client.chat_postMessage(
+            channel=requester_slack_id,
+            text=f"[Rejected] Your transfer request TRF-{transfer_id} was rejected.",
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"[Request Rejected]\n\nYour request `TRF-{transfer_id}` was rejected by {rejector_name}.",
+                    },
+                },
+            ],
+        )
 
 
 @app.action("refresh_home")
@@ -653,7 +722,7 @@ async def handle_return_overdue(ack, body, client: AsyncWebClient):
     tag = body["actions"][0]["value"]
     await client.chat_postMessage(
         channel=body["user"]["id"],
-        text=f"📦 To return asset `{tag}`, please bring it to the IT desk or contact your Asset Manager.",
+        text=f" To return asset `{tag}`, please bring it to the IT desk or contact your Asset Manager.",
     )
 
 
@@ -663,7 +732,7 @@ async def handle_request_extension(ack, body, client: AsyncWebClient):
     tag = body["actions"][0]["value"]
     await client.chat_postMessage(
         channel=body["user"]["id"],
-        text=f"📅 Extension request for `{tag}` noted. Your Asset Manager will be notified.",
+        text=f" Extension request for `{tag}` noted. Your Asset Manager will be notified.",
     )
 
 
@@ -694,3 +763,145 @@ async def handle_show_help_menu(ack, body, client: AsyncWebClient):
         channel=body["user"]["id"],
         text=help_text,
     )
+
+# ── Bot Auditor Functions ────────────────────────────────────────────────────
+
+async def start_bot_auditor(slack_user_id: str, dept_name: str, say, client: AsyncWebClient):
+    """Start an automated Slack audit for a given department."""
+    await say(f"Starting an automated Slack Audit for the {dept_name.capitalize()} department... Please wait.")
+    
+    depts = await api.get_departments()
+    dept = next((d for d in depts if d["name"].lower() == dept_name.lower()), None)
+    if not dept:
+        await say(f"Could not find department '{dept_name}'. Available: {', '.join([d['name'] for d in depts]) if depts else 'None'}")
+        return
+        
+    start_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    end_date = (datetime.now(timezone.utc) + timedelta(days=7)).strftime("%Y-%m-%d")
+    
+    cycle = await api.create_audit_cycle(
+        name=f"{dept['name']} Slack Audit - {start_date}",
+        department_id=dept["id"],
+        start_date=start_date,
+        end_date=end_date
+    )
+    if not cycle or "audit_cycle" not in cycle:
+        await say("Failed to create audit cycle.")
+        return
+        
+    cycle_id = cycle["audit_cycle"]["id"]
+    
+    mapping = await get_user_mapping(slack_user_id)
+    if mapping:
+        members = await api.get_members()
+        admin_ids = [m['User']['id'] for m in members if m.get('role') == 'Admin']
+        await api.assign_auditors(cycle_id, [mapping.assetflow_user_id] + admin_ids)
+    
+    all_assets = await api.list_assets()
+    if not all_assets:
+        await say("No assets found in the system.")
+        return
+    dept_assets = [a for a in all_assets if a.get("status") == "Allocated" and a.get("current_holder_id")]
+    
+    members = await api.get_members()
+    dept_member_ids = [m["User"]["id"] for m in members if m.get("Department") and m["Department"]["id"] == dept["id"]]
+    
+    audit_assets = [a for a in dept_assets if a.get("current_holder_id") in dept_member_ids]
+    
+    if not audit_assets:
+        await say(f"No allocated assets found for {dept['name']}.")
+        return
+        
+    asset_tags = [a["tag"] for a in audit_assets]
+    await api.bulk_add_audit_items(cycle_id, asset_tags)
+    
+    await api.activate_audit_cycle(cycle_id)
+    
+    cycle_details = await api.get_audit_cycle(cycle_id)
+    if not cycle_details or "items" not in cycle_details:
+        await say(f"Audit Cycle `#{cycle_id}` started, but failed to fetch items.")
+        return
+    audit_items = cycle_details["items"]
+    
+    ping_count = 0
+    members = await api.get_members()
+    member_map = {m["User"]["id"]: m["User"].get("slack_user_id") for m in members if m.get("User")}
+    
+    for item in audit_items:
+        holder_id = item["Asset"]["current_holder_id"]
+        tag = item["Asset"]["tag"]
+        name = item["Asset"]["name"]
+        item_id = item["id"]
+        
+        slack_id = member_map.get(holder_id)
+        if slack_id:
+            blocks = [
+                {"type": "section", "text": {"type": "mrkdwn", "text": f"*IT Audit Check*\n\nHi! We are conducting an automated audit for {dept['name']}.\n\nDo you currently have this asset in your possession?\n\n*{name}* (`{tag}`)"}},
+                {"type": "actions", "elements": [
+                    {"type": "button", "text": {"type": "plain_text", "text": "Yes, I have it"}, "action_id": "audit_yes", "value": str(item_id), "style": "primary"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "No, I don't"}, "action_id": "audit_no", "value": str(item_id), "style": "danger"},
+                ]}
+            ]
+            await client.chat_postMessage(channel=slack_id, blocks=blocks, text=f"Audit Check: Do you have {name} ({tag})?")
+            ping_count += 1
+                
+    await say(f"Audit Cycle `#{cycle_id}` started successfully! 🚀\nSent {ping_count} Slack DMs to {dept['name']} employees.")
+
+
+@app.action("audit_yes")
+async def handle_audit_yes(ack, body, client: AsyncWebClient):
+    await ack()
+    item_id = int(body["actions"][0]["value"])
+    channel = body["channel"]["id"]
+    ts = body["message"]["ts"]
+    
+    res = await api.mark_audit_item(item_id, "Verified", "Verified via Slack Bot")
+    if res:
+        await client.chat_update(
+            channel=channel, ts=ts,
+            text="Thanks for confirming! Asset verified.",
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": "✅ *Verified!* Thanks for confirming you have this asset."}}]
+        )
+    else:
+        await client.chat_update(
+            channel=channel, ts=ts,
+            text="⚠️ Failed to verify asset. It may have already been verified.",
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": "⚠️ Failed to verify asset. It may have already been verified."}}]
+        )
+
+@app.action("audit_no")
+async def handle_audit_no(ack, body, client: AsyncWebClient):
+    await ack()
+    item_id = int(body["actions"][0]["value"])
+    channel = body["channel"]["id"]
+    ts = body["message"]["ts"]
+    
+    res = await api.mark_audit_item(item_id, "Missing", "User reported missing via Slack Bot")
+    if res:
+        await client.chat_update(
+            channel=channel, ts=ts,
+            text="Asset marked as Missing.",
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": "🚨 *Marked as Missing.* An IT Admin has been notified."}}]
+        )
+    else:
+        await client.chat_update(
+            channel=channel, ts=ts,
+            text="⚠️ Failed to update asset status.",
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": "⚠️ Failed to update asset status. It may have already been verified."}}]
+        )
+
+@app.command("/link-account")
+async def handle_link_account(ack, respond, command):
+    await ack()
+    text = command.get("text", "").strip()
+    slack_user_id = command.get("user_id")
+    
+    if not text or "@" not in text:
+        await respond("Usage: /link-account <your-email@example.com>")
+        return
+        
+    res = await api.link_slack_account(text, slack_user_id)
+    if res:
+        await respond(f"✅ Successfully linked your Slack account to {text} in AssetFlow!")
+    else:
+        await respond("❌ Failed to link account. Please check the email and try again.")

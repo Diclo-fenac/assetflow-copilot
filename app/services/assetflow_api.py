@@ -164,3 +164,165 @@ async def login(email: str, password: str) -> dict[str, Any] | None:
     except Exception:
         logger.exception("login failed for email=%s", email)
         return None
+
+async def request_transfer(
+    asset_tag: str,
+    requested_new_holder_id: int,
+    reason: str,
+    urgency: str = "Normal",
+) -> dict[str, Any] | None:
+    """POST /api/allocations/transfers."""
+    body = {
+        "asset_tag": asset_tag,
+        "requested_new_holder_id": requested_new_holder_id,
+        "reason": reason,
+        "urgency": urgency,
+    }
+    try:
+        resp = await _get_client().post("/api/allocations/transfers", json=body)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        logger.exception("request_transfer failed")
+        return None
+
+
+async def approve_transfer(transfer_id: int) -> dict[str, Any] | None:
+    """PATCH /api/allocations/transfers/{id}/approve."""
+    try:
+        resp = await _get_client().patch(f"/api/allocations/transfers/{transfer_id}/approve")
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        logger.exception("approve_transfer failed")
+        return None
+
+
+async def reject_transfer(transfer_id: int, reason: str = "") -> dict[str, Any] | None:
+    """PATCH /api/allocations/transfers/{id}/reject."""
+    try:
+        resp = await _get_client().patch(
+            f"/api/allocations/transfers/{transfer_id}/reject",
+            json={"reason": reason}
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        logger.exception("reject_transfer failed")
+        return None
+
+async def report_hardware_issue(asset_tag: str, issue_description: str, priority: str = "Medium") -> dict[str, Any] | None:
+    """POST /api/maintenance."""
+    body = {
+        "asset_tag": asset_tag,
+        "issue_description": issue_description,
+        "priority": priority
+    }
+    try:
+        resp = await _get_client().post("/api/maintenance", json=body)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        logger.exception("report_hardware_issue failed")
+        return None
+
+
+async def create_audit_cycle(name: str, department_id: int, start_date: str, end_date: str) -> dict[str, Any] | None:
+    """POST /api/audit/cycles."""
+    body = {
+        "name": name,
+        "target_department_id": department_id,
+        "start_date": start_date,
+        "end_date": end_date
+    }
+    try:
+        resp = await _get_client().post("/api/audit/cycles", json=body)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        logger.exception("create_audit_cycle failed")
+        return None
+
+async def assign_auditors(cycle_id: int, user_ids: list[int]) -> dict[str, Any] | None:
+    """POST /api/audit/cycles/{id}/auditors."""
+    try:
+        resp = await _get_client().post(f"/api/audit/cycles/{cycle_id}/auditors", json={"user_ids": user_ids})
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        logger.exception("assign_auditors failed")
+        return None
+
+async def bulk_add_audit_items(cycle_id: int, asset_tags: list[str]) -> dict[str, Any] | None:
+    """POST /api/audit/cycles/{id}/items/bulk."""
+    try:
+        resp = await _get_client().post(f"/api/audit/cycles/{cycle_id}/items/bulk", json={"asset_tags": asset_tags})
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        logger.exception("bulk_add_audit_items failed")
+        return None
+
+async def activate_audit_cycle(cycle_id: int) -> dict[str, Any] | None:
+    """PATCH /api/audit/cycles/{id}/activate."""
+    try:
+        resp = await _get_client().patch(f"/api/audit/cycles/{cycle_id}/activate")
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        logger.exception("activate_audit_cycle failed")
+        return None
+
+async def get_audit_cycle(cycle_id: int) -> dict[str, Any] | None:
+    """GET /api/audit/cycles/{id}."""
+    try:
+        resp = await _get_client().get(f"/api/audit/cycles/{cycle_id}")
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        logger.exception("get_audit_cycle failed")
+        return None
+
+async def mark_audit_item(item_id: int, status: str, notes: str = "") -> dict[str, Any] | None:
+    """PATCH /api/audit/items/{id}."""
+    try:
+        resp = await _get_client().patch(f"/api/audit/items/{item_id}", json={"verification_status": status, "notes": notes})
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        logger.exception("mark_audit_item failed")
+        return None
+
+async def get_departments() -> list[dict[str, Any]] | None:
+    """GET /api/departments."""
+    try:
+        resp = await _get_client().get("/api/departments")
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        logger.exception("get_departments failed")
+        return None
+
+async def get_members() -> list[dict[str, Any]] | None:
+    """GET /api/org/members."""
+    try:
+        resp = await _get_client().get("/api/org/members")
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        logger.exception("get_members failed")
+        return None
+
+
+
+
+async def link_slack_account(email: str, slack_user_id: str) -> dict[str, Any] | None:
+    """POST /api/auth/link-slack"""
+    try:
+        resp = await _get_client().post("/api/auth/link-slack", json={"email": email, "slack_user_id": slack_user_id})
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("link_slack_account failed")
+        return None
