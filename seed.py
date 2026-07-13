@@ -6,6 +6,7 @@ Run: python seed.py
 import asyncio
 from app.db.database import init_db, AsyncSessionLocal, TenantMapping, UserMapping
 
+from app.core.config import settings
 
 async def seed():
     await init_db()
@@ -15,7 +16,7 @@ async def seed():
         tenant = TenantMapping(
             slack_workspace_id="T0BGEMDKKT9",
             assetflow_org_id=1,
-            admin_token="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwibmFtZSI6IkFkbWluIiwiZW1haWwiOiJhZG1pbkBhc3NldGZsb3cubG9jYWwiLCJpYXQiOjE3ODM5MjU5NzIsImV4cCI6NDkzOTY4NTk3Mn0.D0pPQo3k2v5ssp03fIJbIri7ujWy6AlS0UA1ICgqi2I",
+            admin_token=settings.assetflow_admin_token,
             approvals_channel_id="C0BGY0TSC5P",
         )
         session.add(tenant)
