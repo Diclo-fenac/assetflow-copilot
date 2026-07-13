@@ -387,7 +387,11 @@ async def handle_mention(event: dict, say, client: AsyncWebClient):
         return
 
     # Default: route through LangGraph agent
-    response = await run_agent(text, context)
+    channel_id = event.get("channel", "default")
+    thread_ts = event.get("thread_ts", event.get("ts", ""))
+    thread_id = f"{channel_id}:{thread_ts}" if thread_ts else channel_id
+
+    response = await run_agent(text, context, thread_id=thread_id)
     await say(response)
 
 
@@ -500,7 +504,11 @@ async def handle_dm(event: dict, say, client: AsyncWebClient):
             await say(f"No available assets found{' in category ' + category if category else ''}. Try asking your Asset Manager.")
         return
 
-    response = await run_agent(text, context)
+    channel_id = event.get("channel", "default")
+    thread_ts = event.get("thread_ts", event.get("ts", ""))
+    thread_id = f"{channel_id}:{thread_ts}" if thread_ts else channel_id
+
+    response = await run_agent(text, context, thread_id=thread_id)
     await say(response)
 
 

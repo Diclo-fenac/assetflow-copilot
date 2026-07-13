@@ -14,6 +14,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
 
 from app.core.config import settings
 from app.services import assetflow_api as api
@@ -212,19 +213,20 @@ def build_agent() -> StateGraph:
     graph.add_conditional_edges("agent", should_continue, {"tools": "tools", "__end__": END})
     graph.add_edge("tools", "agent")
 
-    return graph.compile()
+    checkpointer = MemorySaver()
+    return graph.compile(checkpointer=checkpointer)
 
 
 # Singleton compiled agent
 agent = build_agent()
 
 
-async def run_agent(user_message: str, context: str = "") -> str:
-    """Run the agent with a user message and optional context. Returns the final text response."""
+async def run_agent(user_message: str, context: str = "", thread_id: str = "default") -> str:
+    """Run the agent with a user message, optional context, and thread ID. Returns the final text response."""
     result = await agent.ainvoke({
         "messages": [HumanMessage(content=user_message)],
         "context": context,
-    })
+    }, config={"configurable": {"thread_id": thread_id}})
     # Extract last AI message text
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
